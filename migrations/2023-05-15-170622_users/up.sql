@@ -1,0 +1,8 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY UNIQUE DEFAULT gen_random_uuid(),
+    login TEXT UNIQUE NOT NULL,
+    nickname TEXT,
+    phash TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    last_online TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
