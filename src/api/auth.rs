@@ -21,7 +21,15 @@ struct LoginResponse<'j, 't, 'r> {
     jwt: &'j str,
     token_type: &'t str,
     expires_in: u64,
-    refresh_token: &'r str,
+    #[serde(with = "hex::serde")]
+    refresh_token: &'r [u8],
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    login: String,
+    password: String,
+    remember_me: bool,
 }
 
 #[post("/login")]
@@ -29,7 +37,7 @@ async fn login(
     pool: web::Data<DbPool>,
     phash_secret: web::Data<auth::PhashSecret>,
     encoding_key: web::Data<jsonwebtoken::EncodingKey>,
-    user: web::Form<auth::UserCredentials>,
+    user: web::Form<LoginRequest>,
 ) -> impl Responder {
     let mut conn = try_or_500!(pool.get().await, "Unable to get database connection");
 
@@ -87,7 +95,7 @@ async fn login(
             jwt: &jwt,
             token_type: "Bearer",
             expires_in: auth::JWT_LIFETIME.as_secs(),
-            refresh_token: &hex::encode(refresh_token),
+            refresh_token: &refresh_token,
         })
     } else {
         HttpResponse::Unauthorized().finish()
@@ -155,7 +163,7 @@ async fn token(
                 jwt: &jwt,
                 token_type: "Bearer",
                 expires_in: auth::JWT_LIFETIME.as_secs(),
-                refresh_token: &hex::encode(refresh_token),
+                refresh_token: &refresh_token,
             })
         }
         // Active token not found
