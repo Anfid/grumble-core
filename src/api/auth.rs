@@ -95,6 +95,7 @@ async fn login(
             let cookie = Cookie::build("refresh_token", new_refresh_token_hex)
                 .secure(true)
                 .http_only(true)
+                .same_site(cookie::SameSite::Strict)
                 .max_age(auth::REFRESH_TOKEN_LIFETIME.into())
                 .finish();
             HttpResponse::Ok().cookie(cookie).json(LoginResponse {
@@ -106,13 +107,13 @@ async fn login(
             let cookie = Cookie::build("refresh_token", new_refresh_token_hex)
                 .secure(true)
                 .http_only(true)
+                .same_site(cookie::SameSite::Strict)
                 .expires(cookie::Expiration::Session)
                 .max_age(
                     auth::REFRESH_TOKEN_LIFETIME
                         .try_into()
                         .expect("Refresh token lifetime too big"),
                 )
-                .same_site(cookie::SameSite::Strict)
                 .finish();
             HttpResponse::Ok().cookie(cookie).json(LoginResponse {
                 jwt: &jwt,
