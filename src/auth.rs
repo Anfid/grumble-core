@@ -1,18 +1,17 @@
 use argon2::Argon2;
-use chrono::Utc;
 use password_hash::{PasswordHashString, PasswordHasher, SaltString};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 /// JWTs are considered expired after this duration. Current value: 10 minutes.
-pub const JWT_LIFETIME: Duration = Duration::from_secs(10 * 60);
+pub const JWT_LIFETIME: Duration = Duration::minutes(10);
 /// Refresh tokens are considered expired after this duration. Current value: 90 days.
-pub const REFRESH_TOKEN_LIFETIME: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+pub const REFRESH_TOKEN_LIFETIME: Duration = Duration::days(90);
 
 /// An acceptable margin of error for tokin verification. Current value: 5 minutes.
-pub const TOKEN_LIFETIME_LEEWAY: Duration = Duration::from_secs(5 * 60);
+pub const TOKEN_LIFETIME_LEEWAY: Duration = Duration::minutes(5);
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct UserCredentials {
@@ -72,14 +71,14 @@ pub struct JwtData {
 impl JwtData {
     pub fn new(user_id: Uuid) -> Self {
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
-        let timestamp = Utc::now().timestamp() as u64;
+        let now = OffsetDateTime::now_utc();
         let claims = Claims {
-            exp: timestamp + JWT_LIFETIME.as_secs(),
+            exp: (now + JWT_LIFETIME).unix_timestamp() as u64,
             aud: "grumble".to_string(),
             iss: "grumble".to_string(),
             sub: user_id.urn().to_string(),
             nbf: None,
-            iat: Some(timestamp),
+            iat: Some(now.unix_timestamp() as u64),
         };
 
         Self { header, claims }
@@ -103,7 +102,7 @@ impl JwtData {
             .map(String::from)
             .into_iter()
             .collect();
-        validation.leeway = TOKEN_LIFETIME_LEEWAY.as_secs();
+        validation.leeway = TOKEN_LIFETIME_LEEWAY.whole_seconds() as u64;
         validation.validate_exp = true;
         validation.validate_nbf = true;
         validation.set_audience(&["grumble"]);

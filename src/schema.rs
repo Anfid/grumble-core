@@ -5,9 +5,9 @@ diesel::table! {
         token -> Bytea,
         token_family -> Bytea,
         user_id -> Uuid,
-        issued_at -> Timestamp,
-        expires_at -> Timestamp,
-        redeemed_at -> Nullable<Timestamp>,
+        issued_at -> Timestamptz,
+        expires_at -> Timestamptz,
+        redeemed_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -17,8 +17,8 @@ diesel::table! {
         login -> Text,
         nickname -> Nullable<Text>,
         phash -> Text,
-        created_at -> Timestamp,
-        last_online -> Nullable<Timestamp>,
+        created_at -> Timestamptz,
+        last_online -> Nullable<Timestamptz>,
     }
 }
 

@@ -1,9 +1,10 @@
-use actix_web::{get, post, web, HttpResponse, Responder, Scope};
+use actix_web::cookie::{self, Cookie};
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder, Scope};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use argon2::PasswordVerifier;
-use chrono::Utc;
-use log::error;
+use log::{error, warn};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use super::{try_or_500, ErrorMessage};
 use crate::{auth, db, DbPool};
@@ -16,20 +17,19 @@ pub fn service() -> Scope {
         .service(test_logged_in)
 }
 
-#[derive(Debug, Serialize)]
-struct LoginResponse<'j, 't, 'r> {
-    jwt: &'j str,
-    token_type: &'t str,
-    expires_in: u64,
-    #[serde(with = "hex::serde")]
-    refresh_token: &'r [u8],
-}
-
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
     login: String,
     password: String,
+    /// Checkmark implies cookies concent, set refresh token as a persistent cookie
     remember_me: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LoginResponse<'j, 't> {
+    jwt: &'j str,
+    token_type: &'t str,
+    expires_in: u64,
 }
 
 #[post("/login")]
@@ -37,20 +37,20 @@ async fn login(
     pool: web::Data<DbPool>,
     phash_secret: web::Data<auth::PhashSecret>,
     encoding_key: web::Data<jsonwebtoken::EncodingKey>,
-    user: web::Form<LoginRequest>,
+    params: web::Form<LoginRequest>,
 ) -> impl Responder {
     let mut conn = try_or_500!(pool.get().await, "Unable to get database connection");
 
     // Get user credential info from the database. Returns 404 if user credential info wasn't found and 500 in case of
     // other errors.
     let (uuid, stored_phash) = if let Some(creds) = try_or_500!(
-        db::users::get_creds(&mut conn, &user.login).await,
+        db::users::get_creds(&mut conn, &params.login).await,
         "Unable to fetch user credential info"
     ) {
         creds
     } else {
         return HttpResponse::NotFound().json(ErrorMessage {
-            message: format!("User {} doesn't exist", &user.login),
+            message: format!("User {} doesn't exist", &params.login),
         });
     };
 
@@ -58,8 +58,8 @@ async fn login(
         password_hash::PasswordHash::new(stored_phash.as_str()),
         "Unable to parse password hash string"
     );
-    let auth_result =
-        auth::argon2_context(&phash_secret).verify_password(user.password.as_bytes(), &parsed_hash);
+    let auth_result = auth::argon2_context(&phash_secret)
+        .verify_password(params.password.as_bytes(), &parsed_hash);
 
     if auth_result.is_ok() {
         let jwt = try_or_500!(
@@ -67,15 +67,14 @@ async fn login(
             "Unable to encode JWT"
         );
 
-        let refresh_token = auth::new_refresh_token();
+        let new_refresh_token = auth::new_refresh_token();
         match db::refresh_tokens::insert(
             &mut conn,
             db::refresh_tokens::NewRefreshToken {
-                token: &refresh_token,
-                token_family: &refresh_token,
+                token: &new_refresh_token,
+                token_family: &new_refresh_token,
                 user_id: uuid,
-                expires_at: Utc::now().naive_utc()
-                    + chrono::Duration::from_std(auth::REFRESH_TOKEN_LIFETIME).unwrap(),
+                expires_at: OffsetDateTime::now_utc() + auth::REFRESH_TOKEN_LIFETIME,
             },
         )
         .await
@@ -91,29 +90,69 @@ async fn login(
             }
         };
 
-        HttpResponse::Ok().json(LoginResponse {
-            jwt: &jwt,
-            token_type: "Bearer",
-            expires_in: auth::JWT_LIFETIME.as_secs(),
-            refresh_token: &refresh_token,
-        })
+        let new_refresh_token_hex = hex::encode(&new_refresh_token);
+        if params.remember_me {
+            let cookie = Cookie::build("refresh_token", new_refresh_token_hex)
+                .secure(true)
+                .http_only(true)
+                .max_age(auth::REFRESH_TOKEN_LIFETIME.into())
+                .finish();
+            HttpResponse::Ok().cookie(cookie).json(LoginResponse {
+                jwt: &jwt,
+                token_type: "Bearer",
+                expires_in: auth::JWT_LIFETIME.whole_seconds() as u64,
+            })
+        } else {
+            let cookie = Cookie::build("refresh_token", new_refresh_token_hex)
+                .secure(true)
+                .http_only(true)
+                .expires(cookie::Expiration::Session)
+                .max_age(
+                    auth::REFRESH_TOKEN_LIFETIME
+                        .try_into()
+                        .expect("Refresh token lifetime too big"),
+                )
+                .same_site(cookie::SameSite::Strict)
+                .finish();
+            HttpResponse::Ok().cookie(cookie).json(LoginResponse {
+                jwt: &jwt,
+                token_type: "Bearer",
+                expires_in: auth::JWT_LIFETIME.whole_seconds() as u64,
+            })
+        }
     } else {
         HttpResponse::Unauthorized().finish()
     }
 }
 
-#[derive(Deserialize)]
-struct TokenParams {
-    #[serde(with = "hex::serde")]
-    refresh_token: Vec<u8>,
+#[derive(Debug, Serialize)]
+struct AuthorizationErrorResponse {
+    reason: AuthorizationErrorReason,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AuthorizationErrorReason {
+    TokenMissing,
+    InvalidTokenFormat,
+    NotYetActive,
+    Expired,
+    Reused,
 }
 
 #[post("/token")]
 async fn token(
+    req: HttpRequest,
     pool: web::Data<DbPool>,
     encoding_key: web::Data<jsonwebtoken::EncodingKey>,
-    token_params: web::Form<TokenParams>,
 ) -> impl Responder {
+    let Some(refresh_cookie) = req.cookie("refresh_token") else {
+        return HttpResponse::Unauthorized().json(AuthorizationErrorResponse { reason: AuthorizationErrorReason::TokenMissing });
+    };
+    let Ok(refresh_token): Result<Vec<u8>, _> = hex::decode(refresh_cookie.value()) else {
+        return HttpResponse::Unauthorized().json(AuthorizationErrorResponse { reason: AuthorizationErrorReason::InvalidTokenFormat });
+    };
+
     let mut conn = match pool.get().await {
         Ok(conn) => conn,
         Err(e) => {
@@ -122,23 +161,52 @@ async fn token(
         }
     };
 
-    // TODO: Revoke token family on reuse
-    match db::refresh_tokens::get_active(&mut conn, token_params.refresh_token.as_ref()).await {
+    match db::refresh_tokens::get(&mut conn, refresh_token.as_ref()).await {
         Ok(Some(token_data)) => {
+            let now = OffsetDateTime::now_utc();
+
+            // Check token issue time
+            if now < token_data.issued_at {
+                warn!("Attempt to use refresh token that was issued in the future");
+                return HttpResponse::Unauthorized().json(AuthorizationErrorResponse {
+                    reason: AuthorizationErrorReason::NotYetActive,
+                });
+            }
+
+            // Check token expiry
+            if now > token_data.expires_at {
+                return HttpResponse::Unauthorized().json(AuthorizationErrorResponse {
+                    reason: AuthorizationErrorReason::Expired,
+                });
+            }
+
+            // Check if token was redeemed. If it was, it's very likely that it was leaked. In that case entire token
+            // family has to be invalidated.
+            if token_data.redeemed_at.is_some() {
+                try_or_500!(
+                    db::refresh_tokens::redeem_family(&mut conn, &token_data.token_family, &now)
+                        .await,
+                    "Unable to invalidate token family on token reuse"
+                );
+
+                return HttpResponse::Unauthorized().json(AuthorizationErrorResponse {
+                    reason: AuthorizationErrorReason::Reused,
+                });
+            }
+
             try_or_500!(
-                db::refresh_tokens::redeem(&mut conn, token_data.id.as_ref()).await,
+                db::refresh_tokens::redeem(&mut conn, token_data.id.as_ref(), &now).await,
                 "Unable to mark token as redeemed"
             );
 
-            let refresh_token = auth::new_refresh_token();
+            let new_refresh_token = auth::new_refresh_token();
             match db::refresh_tokens::insert(
                 &mut conn,
                 db::refresh_tokens::NewRefreshToken {
-                    token: &refresh_token,
+                    token: &new_refresh_token,
                     token_family: &token_data.token_family,
                     user_id: token_data.user_id,
-                    expires_at: Utc::now().naive_utc()
-                        + chrono::Duration::from_std(auth::REFRESH_TOKEN_LIFETIME).unwrap(),
+                    expires_at: now + auth::REFRESH_TOKEN_LIFETIME,
                 },
             )
             .await
@@ -162,8 +230,7 @@ async fn token(
             HttpResponse::Ok().json(LoginResponse {
                 jwt: &jwt,
                 token_type: "Bearer",
-                expires_in: auth::JWT_LIFETIME.as_secs(),
-                refresh_token: &refresh_token,
+                expires_in: auth::JWT_LIFETIME.whole_seconds() as u64,
             })
         }
         // Active token not found

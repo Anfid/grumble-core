@@ -1,7 +1,7 @@
-use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel::result::{DatabaseErrorKind as DieselDatabaseErrorKind, Error as DieselError};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{GetError, InsertError};
@@ -13,8 +13,8 @@ pub struct User {
     pub login: String,
     pub nickname: Option<String>,
     pub phash: String,
-    pub created_at: NaiveDateTime,
-    pub last_online: Option<NaiveDateTime>,
+    pub created_at: OffsetDateTime,
+    pub last_online: Option<OffsetDateTime>,
 }
 
 #[derive(Insertable)]
