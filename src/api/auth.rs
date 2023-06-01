@@ -63,7 +63,7 @@ async fn login(
 
     if auth_result.is_ok() {
         let jwt = try_or_500!(
-            auth::JwtData::new(uuid).encode(&*encoding_key),
+            auth::JwtData::new(uuid, &OffsetDateTime::now_utc()).encode(&*encoding_key),
             "Unable to encode JWT"
         );
 
@@ -223,7 +223,7 @@ async fn token(
             };
 
             let jwt = try_or_500!(
-                auth::JwtData::new(token_data.user_id).encode(&*encoding_key),
+                auth::JwtData::new(token_data.user_id, &now).encode(&*encoding_key),
                 "Unable to encode JWT"
             );
 
@@ -243,8 +243,38 @@ async fn token(
 }
 
 #[post("/revoke")]
-async fn revoke() -> impl Responder {
-    HttpResponse::NotImplemented().finish()
+async fn revoke(req: HttpRequest, pool: web::Data<DbPool>) -> impl Responder {
+    let Some(refresh_cookie) = req.cookie("refresh_token") else {
+        return HttpResponse::Unauthorized().json(AuthorizationErrorResponse { reason: AuthorizationErrorReason::TokenMissing });
+    };
+    let Ok(refresh_token): Result<Vec<u8>, _> = hex::decode(refresh_cookie.value()) else {
+        return HttpResponse::Unauthorized().json(AuthorizationErrorResponse { reason: AuthorizationErrorReason::InvalidTokenFormat });
+    };
+
+    let mut conn = match pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            error!("Unable to get database connection: {}", e);
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    match db::refresh_tokens::get(&mut conn, refresh_token.as_ref()).await {
+        Ok(Some(token_data)) => {
+            let now = OffsetDateTime::now_utc();
+            try_or_500!(
+                db::refresh_tokens::redeem_family(&mut conn, &token_data.token_family, &now).await,
+                "Unable to revoke token family on request"
+            );
+            HttpResponse::Ok().finish()
+        }
+        // Active token not found
+        Ok(None) => HttpResponse::Unauthorized().finish(),
+        Err(_do_not_leak_error) => {
+            error!("Unable to query refresh token");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
 }
 
 #[get("/test_logged_in")]

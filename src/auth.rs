@@ -69,11 +69,10 @@ pub struct JwtData {
 }
 
 impl JwtData {
-    pub fn new(user_id: Uuid) -> Self {
+    pub fn new(user_id: Uuid, now: &OffsetDateTime) -> Self {
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
-        let now = OffsetDateTime::now_utc();
         let claims = Claims {
-            exp: (now + JWT_LIFETIME).unix_timestamp() as u64,
+            exp: (*now + JWT_LIFETIME).unix_timestamp() as u64,
             aud: "grumble".to_string(),
             iss: "grumble".to_string(),
             sub: user_id.urn().to_string(),
