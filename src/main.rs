@@ -2,6 +2,7 @@ use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
 use diesel_async::pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager};
 use dotenvy::dotenv;
+use josekit::jws::EdDSA;
 use std::env;
 
 mod api;
@@ -39,14 +40,12 @@ async fn main() -> std::io::Result<()> {
             .transpose()
             .expect("PHASH_SECRET_KEY must be a valid hex string"),
     );
-    let private_key = jsonwebtoken::EncodingKey::from_ed_pem(
-        &std::fs::read(env::var("AUTH_PRIVATE_KEY_PATH").unwrap()).unwrap(),
-    )
-    .unwrap();
-    let public_key = jsonwebtoken::DecodingKey::from_ed_pem(
-        &std::fs::read(env::var("AUTH_PUBLIC_KEY_PATH").unwrap()).unwrap(),
-    )
-    .unwrap();
+    let private_key = EdDSA
+        .signer_from_pem(&std::fs::read(env::var("AUTH_PRIVATE_KEY_PATH").unwrap()).unwrap())
+        .unwrap();
+    let public_key = EdDSA
+        .verifier_from_pem(&std::fs::read(env::var("AUTH_PUBLIC_KEY_PATH").unwrap()).unwrap())
+        .unwrap();
 
     let bind_address = env::var("BIND_ADDRESS").expect("BIND_ADDRESS must be set");
 

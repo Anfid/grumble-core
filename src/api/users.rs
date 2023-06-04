@@ -1,5 +1,6 @@
 use actix_web::{post, web, HttpResponse, Responder, Scope};
 use log::error;
+use serde::Deserialize;
 
 use super::try_or_500;
 use crate::{auth, db, DbPool, PhashSecret};
@@ -8,11 +9,17 @@ pub fn service() -> Scope {
     Scope::new("/users").service(register)
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct RegisterParams {
+    pub login: String,
+    pub password: String,
+}
+
 #[post("/register")]
 async fn register(
     pool: web::Data<DbPool>,
     phash_secret: web::Data<PhashSecret>,
-    user: web::Form<auth::UserCredentials>,
+    user: web::Form<RegisterParams>,
 ) -> impl Responder {
     let mut conn = try_or_500!(pool.get().await, "Unable to get database connection");
     let argon2 = auth::argon2_context(&phash_secret);

@@ -2,6 +2,7 @@ use actix_web::cookie::{self, Cookie};
 use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder, Scope};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use argon2::PasswordVerifier;
+use josekit::jws::alg::eddsa::{EddsaJwsSigner, EddsaJwsVerifier};
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -36,7 +37,7 @@ struct LoginResponse<'j, 't> {
 async fn login(
     pool: web::Data<DbPool>,
     phash_secret: web::Data<auth::PhashSecret>,
-    encoding_key: web::Data<jsonwebtoken::EncodingKey>,
+    encoding_key: web::Data<EddsaJwsSigner>,
     params: web::Form<LoginRequest>,
 ) -> impl Responder {
     let mut conn = try_or_500!(pool.get().await, "Unable to get database connection");
@@ -63,7 +64,7 @@ async fn login(
 
     if auth_result.is_ok() {
         let jwt = try_or_500!(
-            auth::JwtData::new(uuid, &OffsetDateTime::now_utc()).encode(&*encoding_key),
+            auth::Claims::new(uuid, &OffsetDateTime::now_utc()).encode_sign(encoding_key.as_ref()),
             "Unable to encode JWT"
         );
 
@@ -145,7 +146,7 @@ enum AuthorizationErrorReason {
 async fn token(
     req: HttpRequest,
     pool: web::Data<DbPool>,
-    encoding_key: web::Data<jsonwebtoken::EncodingKey>,
+    encoding_key: web::Data<EddsaJwsSigner>,
 ) -> impl Responder {
     let Some(refresh_cookie) = req.cookie("refresh_token") else {
         return HttpResponse::Unauthorized().json(AuthorizationErrorResponse { reason: AuthorizationErrorReason::TokenMissing });
@@ -224,7 +225,7 @@ async fn token(
             };
 
             let jwt = try_or_500!(
-                auth::JwtData::new(token_data.user_id, &now).encode(&*encoding_key),
+                auth::Claims::new(token_data.user_id, &now).encode_sign(encoding_key.as_ref()),
                 "Unable to encode JWT"
             );
 
@@ -281,11 +282,17 @@ async fn revoke(req: HttpRequest, pool: web::Data<DbPool>) -> impl Responder {
 #[get("/test_logged_in")]
 async fn test_logged_in(
     auth: BearerAuth,
-    decoding_key: web::Data<jsonwebtoken::DecodingKey>,
+    decoding_key: web::Data<EddsaJwsVerifier>,
 ) -> impl Responder {
-    let auth_result = auth::JwtData::decode(&*decoding_key, auth.token());
+    let auth_result = auth::Claims::decode(decoding_key.as_ref(), auth.token());
+    let now = OffsetDateTime::now_utc();
     match auth_result {
-        Ok(jwt) => HttpResponse::Ok().body(format!("Logged in as user {}", jwt.claims.sub)),
-        Err(e) => HttpResponse::Ok().body(format!("Not logged in, verification failed: {}", e)),
+        Ok(claims) => match claims.verify_claims(now) {
+            Ok(authorized) => {
+                HttpResponse::Ok().body(format!("Logged in as user {}", authorized.user))
+            }
+            Err(e) => HttpResponse::Ok().body(format!("Not logged in, verification failed: {e}")),
+        },
+        Err(e) => HttpResponse::Ok().body(format!("Not logged in, verification failed: {e}")),
     }
 }
