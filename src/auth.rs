@@ -169,57 +169,46 @@ mod tests {
     use josekit::jws::{EdDSA, ES512};
     use std::time::SystemTime;
 
-    const PRIVATE_TEST_KEY: &str = "\
-        -----BEGIN PRIVATE KEY-----\n\
-        MC4CAQAwBQYDK2VwBCIEIHYMMzy4pcknTawU4ILwjZzFZLvdm7BYBFkXaDamf8Ef\n\
-        -----END PRIVATE KEY-----";
-
-    const PUBLIC_TEST_KEY: &str = "\
-        -----BEGIN PUBLIC KEY-----\n\
-        MCowBQYDK2VwAyEAp4tyhXtwJ+zOrCbzENlP6WIEM0xbtFAEwdc9YT1RrtM=\n\
-        -----END PUBLIC KEY-----";
-
-    const UNKNOWN_PRIVATE_TEST_KEY: &str = "\
-        -----BEGIN PRIVATE KEY-----\n\
-        MC4CAQAwBQYDK2VwBCIEIPUozvGIp0U6l9fGmZW2sbwGjsq+SILcGlYNR0aQsNvk\n\
-        -----END PRIVATE KEY-----";
-
-    const UNKNOWN_PRIVATE_TEST_EC_KEY: &str = "\
-        -----BEGIN EC PRIVATE KEY-----\n\
-        MIHbAgEBBEFDsxe+ApHz+jStMUDMazU+aotah1kR8DgCvHasJieIh2H/SUIBiv68\n\
-        VFwGOhDKnIuvHGP7WnZ5sKUH+/etexwh7KAHBgUrgQQAI6GBiQOBhgAEABWPisJ7\n\
-        7bdneki5uxMU7pICuPIFiSB7WCrWKd2niWqjNuvv6D8gmJp5YAsQX9cD8WrUH32i\n\
-        JUv0XUJqcqkm3BzZAYXCl+bLadq5Oc7i7OV/mk0P1pjQzWxMjO+i6nJ904lylxYr\n\
-        a0apZLttCaGkkXvqkqYsm/831Wy5bfQIx0KMskgc\n\
-        -----END EC PRIVATE KEY-----";
-
     const USER_1: Uuid = Uuid::from_bytes([
         0xa1, 0xa2, 0xa3, 0xa4, 0xb1, 0xb2, 0xc1, 0xc2, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
         0xd8,
     ]);
 
-    fn private_test_key() -> impl JwsSigner {
-        EdDSA
-            .signer_from_pem(PRIVATE_TEST_KEY.as_bytes())
-            .expect("Unable to parse test private key")
+    struct TestKeyPair<S: JwsSigner, V: JwsVerifier> {
+        private: S,
+        public: V,
     }
 
-    fn public_test_key() -> impl JwsVerifier {
-        EdDSA
-            .verifier_from_pem(PUBLIC_TEST_KEY.as_bytes())
-            .expect("Unable to parse test public key")
+    fn gen_ed_key_pair() -> TestKeyPair<impl JwsSigner, impl JwsVerifier> {
+        let key_pair = EdDSA
+            .generate_key_pair(josekit::jwk::alg::ed::EdCurve::Ed25519)
+            .expect("Unable to generate test key pair");
+
+        // Not sure why, but there's no API for direct conversion of key pair into JwsSigner and JwsVerifier
+        let private = EdDSA
+            .signer_from_der(key_pair.to_der_private_key())
+            .expect("Unable to parse generated der private key");
+        let public = EdDSA
+            .verifier_from_der(key_pair.to_der_public_key())
+            .expect("Unable to parse generated der public key");
+
+        TestKeyPair { private, public }
     }
 
-    fn unknown_private_test_key() -> impl JwsSigner {
-        EdDSA
-            .signer_from_pem(UNKNOWN_PRIVATE_TEST_KEY.as_bytes())
-            .expect("Unable to parse test private key")
-    }
+    fn gen_ec_key_pair() -> TestKeyPair<impl JwsSigner, impl JwsVerifier> {
+        let key_pair = ES512
+            .generate_key_pair()
+            .expect("Unable to generate test key pair");
 
-    fn unknown_private_test_ec_key() -> impl JwsSigner {
-        ES512
-            .signer_from_pem(UNKNOWN_PRIVATE_TEST_EC_KEY.as_bytes())
-            .expect("Unable to parse test private key")
+        // Not sure why, but there's no API for direct conversion of key pair into JwsSigner and JwsVerifier
+        let private = ES512
+            .signer_from_der(key_pair.to_der_private_key())
+            .expect("Unable to parse generated der private key");
+        let public = ES512
+            .verifier_from_der(key_pair.to_der_public_key())
+            .expect("Unable to parse generated der public key");
+
+        TestKeyPair { private, public }
     }
 
     // Returns time with offset for testing purposes.
@@ -252,10 +241,11 @@ mod tests {
         payload.set_issuer("grumble");
         payload.set_subject(USER_1.urn().to_string());
 
-        let jwt = encode_sign(&payload, &private_test_key())
+        let known_key_pair = gen_ed_key_pair();
+        let jwt = encode_sign(&payload, &known_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
-        let user = Claims::decode(&public_test_key(), &jwt)?.verify_claims(now)?;
+        let user = Claims::decode(&known_key_pair.public, &jwt)?.verify_claims(now)?;
         assert_eq!(user.user, USER_1);
 
         Ok(())
@@ -273,10 +263,11 @@ mod tests {
         // JWT is expired, but still within allowed leeway
         payload.set_expires_at(&SystemTime::from(now + JWT_LIFETIME));
 
-        let jwt = encode_sign(&payload, &private_test_key())
+        let known_key_pair = gen_ed_key_pair();
+        let jwt = encode_sign(&payload, &known_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
-        Claims::decode(&public_test_key(), &jwt)?.verify_claims(now)?;
+        Claims::decode(&known_key_pair.public, &jwt)?.verify_claims(now)?;
         Ok(())
     }
 
@@ -294,11 +285,12 @@ mod tests {
             now - TOKEN_LIFETIME_LEEWAY - Duration::seconds(1),
         ));
 
-        let jwt = encode_sign(&payload, &private_test_key())
+        let known_key_pair = gen_ed_key_pair();
+        let jwt = encode_sign(&payload, &known_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
         assert_eq!(
-            Claims::decode(&public_test_key(), &jwt)?
+            Claims::decode(&known_key_pair.public, &jwt)?
                 .verify_claims(now)
                 .expect_err("No error on expired token verification"),
             ClaimsVerificationError::TokenExpired
@@ -319,11 +311,12 @@ mod tests {
         // Audience of this token is unknown
         payload.set_audience(vec!["unknown"]);
 
-        let jwt = encode_sign(&payload, &private_test_key())
+        let known_key_pair = gen_ed_key_pair();
+        let jwt = encode_sign(&payload, &known_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
         assert_eq!(
-            Claims::decode(&public_test_key(), &jwt)?
+            Claims::decode(&known_key_pair.public, &jwt)?
                 .verify_claims(now)
                 .expect_err("No error on expired token verification"),
             ClaimsVerificationError::AudienceMismatch
@@ -344,11 +337,12 @@ mod tests {
         // Issuer of this token is unknown
         payload.set_issuer("unknown");
 
-        let jwt = encode_sign(&payload, &private_test_key())
+        let known_key_pair = gen_ed_key_pair();
+        let jwt = encode_sign(&payload, &known_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
         assert_eq!(
-            Claims::decode(&public_test_key(), &jwt)?
+            Claims::decode(&known_key_pair.public, &jwt)?
                 .verify_claims(now)
                 .expect_err("No error on expired token verification"),
             ClaimsVerificationError::UnknownIssuer
@@ -367,11 +361,12 @@ mod tests {
         payload.set_audience(vec!["grumble"]);
         payload.set_issuer("grumble");
 
-        let jwt = encode_sign(&payload, &private_test_key())
+        let known_key_pair = gen_ed_key_pair();
+        let jwt = encode_sign(&payload, &known_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
         assert_eq!(
-            Claims::decode(&public_test_key(), &jwt)?
+            Claims::decode(&known_key_pair.public, &jwt)?
                 .verify_claims(now)
                 .expect_err("No error on expired token verification"),
             ClaimsVerificationError::ClaimMissing
@@ -392,11 +387,12 @@ mod tests {
         // Subject of this token has invalid format
         payload.set_subject("invalid user ID");
 
-        let jwt = encode_sign(&payload, &private_test_key())
+        let known_key_pair = gen_ed_key_pair();
+        let jwt = encode_sign(&payload, &known_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
         assert_eq!(
-            Claims::decode(&public_test_key(), &jwt)?
+            Claims::decode(&known_key_pair.public, &jwt)?
                 .verify_claims(now)
                 .expect_err("No error on expired token verification"),
             ClaimsVerificationError::InvalidUserId
@@ -416,12 +412,17 @@ mod tests {
         payload.set_issuer("grumble");
         payload.set_subject(USER_1.urn().to_string());
 
+        // Generate 2 keypairs
+        let known_key_pair = gen_ed_key_pair();
+        let unknown_key_pair = gen_ed_key_pair();
+
         // Unknown private key used for signing
-        let jwt = encode_sign(&payload, &unknown_private_test_key())
+        let jwt = encode_sign(&payload, &unknown_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
+        // Known public key used for verifying
         assert!(matches!(
-            Claims::decode(&public_test_key(), &jwt),
+            Claims::decode(&known_key_pair.public, &jwt),
             Err(JoseError::InvalidSignature(_))
         ));
 
@@ -439,12 +440,17 @@ mod tests {
         payload.set_issuer("grumble");
         payload.set_subject(USER_1.urn().to_string());
 
-        // Unknown private key used for signing
-        let jwt = encode_sign(&payload, &unknown_private_test_ec_key())
+        // Generate 2 keypairs
+        let known_key_pair = gen_ed_key_pair();
+        let unknown_ec_key_pair = gen_ec_key_pair();
+
+        // Unknown EC private key used for signing
+        let jwt = encode_sign(&payload, &unknown_ec_key_pair.private)
             .expect("Unable to encode and sign a valid jwt");
 
+        // Known public key used for verifying
         assert!(matches!(
-            Claims::decode(&public_test_key(), &jwt),
+            Claims::decode(&known_key_pair.public, &jwt),
             Err(JoseError::InvalidJwsFormat(_))
         ));
 
