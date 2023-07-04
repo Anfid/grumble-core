@@ -7,15 +7,21 @@ use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{try_or_500, ErrorMessage};
-use crate::{auth, db, DbPool};
+use crate::{auth, db, DbPool, PhashSecret};
 
 pub fn service() -> Scope {
-    Scope::new("/auth")
+    Scope::new("/v1")
+        .service(register)
         .service(login)
         .service(token)
         .service(revoke)
         .service(test_logged_in)
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterParams {
+    pub login: String,
+    pub password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,13 +39,57 @@ struct LoginResponse<'j, 't> {
     expires_in: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct AuthorizationErrorResponse {
+    reason: AuthorizationErrorReason,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AuthorizationErrorReason {
+    TokenMissing,
+    InvalidTokenFormat,
+    NotYetActive,
+    Expired,
+    Reused,
+}
+
+#[post("/register")]
+async fn register(
+    req: HttpRequest,
+    phash_secret: web::Data<PhashSecret>,
+    user: web::Form<RegisterParams>,
+) -> impl Responder {
+    let pool: &DbPool = req.app_data().unwrap();
+    let mut conn = try_or_500!(pool.get().await, "Unable to get database connection");
+    let argon2 = auth::argon2_context(&phash_secret);
+    let phash = auth::password_to_phash_string(&argon2, user.password.as_bytes());
+
+    let new_user = db::users::NewUser {
+        login: &user.login,
+        nickname: None,
+        phash: phash.as_str(),
+    };
+    match db::users::insert(&mut conn, new_user).await {
+        Ok(()) => HttpResponse::Created().finish(),
+        // Entry already exists
+        Err(db::InsertError::UniqueViolation(_)) => HttpResponse::Conflict().finish(),
+        // Unexpected error,
+        Err(db::InsertError::Other(e)) => {
+            error!("User registration failed: {}", e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
 #[post("/login")]
 async fn login(
-    pool: web::Data<DbPool>,
+    req: HttpRequest,
     phash_secret: web::Data<auth::PhashSecret>,
     encoding_key: web::Data<EddsaJwsSigner>,
     params: web::Form<LoginRequest>,
 ) -> impl Responder {
+    let pool: &DbPool = req.app_data().unwrap();
     let mut conn = try_or_500!(pool.get().await, "Unable to get database connection");
 
     // Get user credential info from the database. Returns 404 if user credential info wasn't found and 500 in case of
@@ -127,27 +177,9 @@ async fn login(
     }
 }
 
-#[derive(Debug, Serialize)]
-struct AuthorizationErrorResponse {
-    reason: AuthorizationErrorReason,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum AuthorizationErrorReason {
-    TokenMissing,
-    InvalidTokenFormat,
-    NotYetActive,
-    Expired,
-    Reused,
-}
-
 #[post("/token")]
-async fn token(
-    req: HttpRequest,
-    pool: web::Data<DbPool>,
-    encoding_key: web::Data<EddsaJwsSigner>,
-) -> impl Responder {
+async fn token(req: HttpRequest, encoding_key: web::Data<EddsaJwsSigner>) -> impl Responder {
+    let pool: &DbPool = req.app_data().unwrap();
     let Some(refresh_cookie) = req.cookie("refresh_token") else {
         return HttpResponse::Unauthorized().json(AuthorizationErrorResponse { reason: AuthorizationErrorReason::TokenMissing });
     };
@@ -245,7 +277,8 @@ async fn token(
 }
 
 #[post("/revoke")]
-async fn revoke(req: HttpRequest, pool: web::Data<DbPool>) -> impl Responder {
+async fn revoke(req: HttpRequest) -> impl Responder {
+    let pool: &DbPool = req.app_data().unwrap();
     let Some(refresh_cookie) = req.cookie("refresh_token") else {
         return HttpResponse::Unauthorized().json(AuthorizationErrorResponse { reason: AuthorizationErrorReason::TokenMissing });
     };
@@ -296,3 +329,21 @@ async fn test_logged_in(
         Err(e) => HttpResponse::Ok().body(format!("Not logged in, verification failed: {e}")),
     }
 }
+
+#[derive(Serialize)]
+pub struct ErrorMessage<M: AsRef<str>> {
+    message: M,
+}
+
+macro_rules! try_or_500 {
+    ($fallible:expr, $message:expr) => {
+        match $fallible {
+            Ok(result) => result,
+            Err(cause) => {
+                error!("{}: {}", $message, cause);
+                return actix_web::HttpResponse::InternalServerError().finish();
+            }
+        }
+    };
+}
+pub(crate) use try_or_500;
